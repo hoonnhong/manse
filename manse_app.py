@@ -137,6 +137,18 @@ if df is not None:
 
     # --- '만세력 조회 및 결과' 탭 ---
     with tab1:
+        # --- UI Helper Function ---
+        def create_labeled_input(label, widget_fn, widget_args=None, widget_kwargs=None):
+            """라벨과 입력 위젯을 한 줄에 생성하는 헬퍼 함수"""
+            if widget_args is None: widget_args = []
+            if widget_kwargs is None: widget_kwargs = {}
+            
+            cols = st.columns([1, 2.5])
+            with cols[0]:
+                st.markdown(f"<div style='height: 38px; display: flex; align-items: center;'>{label}</div>", unsafe_allow_html=True)
+            with cols[1]:
+                return widget_fn(*widget_args, **widget_kwargs)
+
         # --- 사용자 입력 필드 ---
         # 각 입력 항목을 라벨과 입력 필드로 구성된 행으로 재구성합니다.
         
@@ -144,24 +156,18 @@ if df is not None:
         cols = st.columns([1, 2.5]) # 라벨과 입력 필드의 비율 조정
         with cols[0]:
             st.markdown("<div style='height: 38px; display: flex; align-items: center;'>생년월일</div>", unsafe_allow_html=True)
-        with cols[1]:
-            birth_date_str = st.text_input("생년월일", placeholder="예: 19000101", label_visibility="collapsed")
+        birth_date_str = cols[1].text_input("생년월일", placeholder="예: 19000101", label_visibility="collapsed")
 
         # 2. 시간
-        cols = st.columns([1, 2.5])
-        with cols[0]:
-            st.markdown("<div style='height: 38px; display: flex; align-items: center;'>시간</div>", unsafe_allow_html=True)
-        with cols[1]:
-            inner_cols = st.columns([1.5, 1.5]) # 라디오 버튼과 입력 필드를 위한 내부 컬럼
-            with inner_cols[0]:
-                time_input_method = st.radio("시간 입력 방식", ('직접 입력', '12지시'), horizontal=True, label_visibility="collapsed")
-            with inner_cols[1]:
-                if time_input_method == '12지시':
-                    birth_time_option = st.selectbox("12지시", options=constants.JIJI_OPTIONS, label_visibility="collapsed")
-                    birth_time_str_direct = ''
-                else:
-                    birth_time_str_direct = st.text_input("직접 입력", placeholder="숫자 네자리를 넣어주세요", max_chars=4, label_visibility="collapsed")
-                    birth_time_option = '시간 선택 안 함'
+        time_cols = st.columns([1, 1.25, 1.25])
+        time_cols[0].markdown("<div style='height: 38px; display: flex; align-items: center;'>시간</div>", unsafe_allow_html=True)
+        time_input_method = time_cols[1].radio("시간 입력 방식", ('직접 입력', '12지시'), horizontal=True, label_visibility="collapsed")
+        if time_input_method == '12지시':
+            birth_time_option = time_cols[2].selectbox("12지시", options=constants.JIJI_OPTIONS, label_visibility="collapsed")
+            birth_time_str_direct = ''
+        else:
+            birth_time_str_direct = time_cols[2].text_input("직접 입력", placeholder="숫자 네자리를 넣어주세요", max_chars=4, label_visibility="collapsed")
+            birth_time_option = '시간 선택 안 함'
 
         # 3. 달력 종류
         cols = st.columns([1, 2.5])
@@ -200,92 +206,25 @@ if df is not None:
             if st.button("만세력 정보 조회하기", use_container_width=True):
                 # 버튼을 누르면 이전 오류 메시지를 지웁니다.
                 error_container.empty()
-                date_obj, error_msg = utils.validate_date(birth_date_str)
                 
+                # utils.py에 새로 만든 함수를 호출하여 결과와 오류 메시지를 한 번에 받습니다.
+                result_data, error_msg = utils.calculate_manse_info(
+                    df=df,
+                    birth_date_str=birth_date_str,
+                    time_input_method=time_input_method,
+                    birth_time_str_direct=birth_time_str_direct,
+                    birth_time_option=birth_time_option,
+                    cal_type=cal_type,
+                    birth_region=birth_region,
+                    blood_type_base=blood_type_base,
+                    is_rh_minus=is_rh_minus
+                )
+
                 if error_msg:
                     error_container.error(error_msg)
                     st.session_state.result_data = {}
-                    st.stop()
-
-                is_time_entered = False
-                birth_time_for_calc = None
-
-                # 시간 입력 처리 로직: 라디오 버튼 값을 직접 사용
-                if time_input_method == '직접 입력':
-                    if birth_time_str_direct: # 입력 값이 있을 경우에만 처리
-                        if len(birth_time_str_direct) == 4 and birth_time_str_direct.isdigit():
-                            try:
-                                hour, minute = int(birth_time_str_direct[:2]), int(birth_time_str_direct[2:])
-                                if not (0 <= hour <= 23 and 0 <= minute <= 59):
-                                    error_container.error("시간을 0000에서 2359 사이의 유효한 값으로 입력해주세요.")
-                                    st.stop()
-                                birth_time_for_calc = time(hour, minute)
-                                is_time_entered = True
-                            except ValueError:
-                                error_container.error("시간을 4자리 숫자로 정확하게 입력해주세요.")
-                                st.stop()
-                        else:
-                             # 시간이 비어있으면 그냥 넘어갑니다 (시간 입력 안함으로 처리)
-                             is_time_entered = False
-                elif time_input_method == '12지시':
-                    if birth_time_option != '시간 선택 안 함':
-                        is_time_entered = True
-                
-                lookup_date = date_obj
-                true_solar_dt = None
-                region_offset = constants.BIRTH_REGIONS.get(birth_region, 0)
-
-                if is_time_entered:
-                    if time_input_method == '12지시':
-                        try:
-                            time_str = birth_time_option.split('(')[1].split('~')[0]
-                            hour, minute = map(int, time_str.split(':'))
-                            base_dt = datetime.combine(date_obj, time(hour, minute))
-                            true_solar_dt = base_dt + timedelta(minutes=region_offset)
-                        except (IndexError, ValueError): is_time_entered = False
-                    else: # 직접 입력
-                        if birth_time_for_calc:
-                            base_dt = datetime.combine(date_obj, birth_time_for_calc)
-                            true_solar_dt = base_dt + timedelta(minutes=region_offset)
-                
-                lookup_year, lookup_month, lookup_day = lookup_date.year, lookup_date.month, lookup_date.day
-                query_map = {
-                    "양력": (df['solar_year'] == lookup_year) & (df['solar_month'] == lookup_month) & (df['solar_day'] == lookup_day),
-                    "음력(평달)": (df['lunar_year'] == lookup_year) & (df['lunar_month'] == lookup_month) & (df['lunar_day'] == lookup_day) & (df['is_leap'] != '윤'),
-                    "음력(윤달)": (df['lunar_year'] == lookup_year) & (df['lunar_month'] == lookup_month) & (df['lunar_day'] == lookup_day) & (df['is_leap'] == '윤')
-                }
-                result_row = df[query_map[cal_type]]
-
-                if not result_row.empty:
-                    result = result_row.iloc[0]
-                    korean_age = datetime.now().year - result['solar_year'] + 1
-                    pillars = {
-                        "연주(年柱)": result['year_ganjee_hj'], "월주(月柱)": result['month_ganjee_hj'], "일주(日柱)": result['day_ganjee_hj'],
-                    }
-                    if is_time_entered and true_solar_dt is not None:
-                        time_jiji = utils.get_time_jiji_from_datetime(true_solar_dt)
-                        if time_jiji:
-                            time_cheon = utils.get_time_cheongan(pillars["일주(日柱)"], time_jiji)
-                            if time_cheon: pillars["시주(時柱)"] = time_cheon + time_jiji
-                    
-                    # 혈액형 문자열 조합
-                    blood_type = ""
-                    if blood_type_base != "선택 안함":
-                        if is_rh_minus:
-                            blood_type = f"{blood_type_base}(Rh-)"
-                        else:
-                            blood_type = blood_type_base
-
-                    st.session_state.result_data = {
-                        "birth_date": date_obj.strftime('%y.%m.%d'), "age": korean_age,
-                        "blood_type": blood_type,
-                        "zodiac": constants.JIJI_TO_ZODIAC.get(pillars.get("연주(年柱)", "  ")[1], ""),
-                        "pillars": pillars,
-                        "cal_type": cal_type
-                    }
                 else:
-                    error_container.error("데이터베이스에서 해당 날짜 정보를 찾을 수 없습니다. (지원 범위: 1900년 ~ 2050년)")
-                    st.session_state.result_data = {}
+                    st.session_state.result_data = result_data
         
         with btn_col2:
             if st.button("인쇄하기", use_container_width=True):
@@ -406,4 +345,3 @@ if df is not None:
             
             # 인쇄 컴포넌트를 렌더링한 후, 트리거를 리셋합니다.
             st.session_state.do_print = False
-

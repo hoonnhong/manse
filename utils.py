@@ -7,7 +7,7 @@ import streamlit as st
 import pandas as pd
 import sqlite3
 from datetime import datetime
-import json
+from datetime import datetime, timedelta, time
 import os
 from constants import CHEONGAN, JIJI # constants.py 파일에서 천간, 지지 리스트를 가져옵니다.
 
@@ -70,24 +70,27 @@ def get_time_jiji_from_datetime(birth_dt):
     태어난 시간(datetime 객체)을 기준으로 12지지(자시, 축시 등) 중 해당하는 시간의 지지를 반환합니다.
     예: 12시 30분 -> '午' (오)
     """
+    # 시간대와 지지를 매핑하는 리스트. (시작 시간(HHMM), 지지)
+    TIME_JIJI_MAP = [
+        (130, "丑"), (330, "寅"), (530, "卯"), (730, "辰"),
+        (930, "巳"), (1130, "午"), (1330, "未"), (1530, "申"),
+        (1730, "酉"), (1930, "戌"), (2130, "亥"), (2330, "子")
+    ]
+
     # 시간을 '시*100 + 분' 형태의 숫자로 변환하여 비교하기 쉽게 만듭니다. 예: 11시 30분 -> 1130
     time_val = birth_dt.hour * 100 + birth_dt.minute
-    
-    # 각 시간대에 맞는 지지를 반환합니다.
-    # 23:30부터 다음날 01:29까지는 자시(子)에 해당합니다.
-    if 2330 <= time_val or time_val < 130: return "子"
-    if 130 <= time_val < 330: return "丑"
-    if 330 <= time_val < 530: return "寅"
-    if 530 <= time_val < 730: return "卯"
-    if 730 <= time_val < 930: return "辰"
-    if 930 <= time_val < 1130: return "巳"
-    if 1130 <= time_val < 1330: return "午"
-    if 1330 <= time_val < 1530: return "未"
-    if 1530 <= time_val < 1730: return "申"
-    if 1730 <= time_val < 1930: return "酉"
-    if 1930 <= time_val < 2130: return "戌"
-    if 2130 <= time_val < 2330: return "亥"
-    return None # 어떤 시간대에도 해당하지 않을 경우 None을 반환합니다. (이론적으로는 발생하지 않음)
+
+    # 23:30 이후는 다음 날의 자시(子)에 해당
+    if time_val >= 2330:
+        return "子"
+
+    # 시간대 맵을 순회하며 해당하는 지지를 찾습니다.
+    for limit, jiji in TIME_JIJI_MAP:
+        if time_val < limit:
+            return jiji
+
+    # 01:30 이전은 자시(子)에 해당
+    return "子"
 
 def get_time_cheongan(day_ganjee_hj, time_jiji):
     """
@@ -130,8 +133,97 @@ def validate_date(date_str):
         # 변환 실패 시 (예: "20230230"처럼 없는 날짜) 에러 메시지 반환
         return None, "입력하신 날짜가 유효하지 않습니다. 다시 확인해주세요."
 
+def calculate_manse_info(df, birth_date_str, time_input_method, birth_time_str_direct, birth_time_option, cal_type, birth_region, blood_type_base, is_rh_minus):
+    """사용자 입력을 바탕으로 만세력 정보를 계산하고 결과 딕셔너리 또는 오류 메시지를 반환합니다."""
+    from constants import BIRTH_REGIONS, JIJI_TO_ZODIAC
+
+    date_obj, error_msg = validate_date(birth_date_str)
+    if error_msg:
+        return None, error_msg
+
+    is_time_entered = False
+    birth_time_for_calc = None
+
+    if time_input_method == '직접 입력':
+        if birth_time_str_direct:
+            if len(birth_time_str_direct) == 4 and birth_time_str_direct.isdigit():
+                try:
+                    hour, minute = int(birth_time_str_direct[:2]), int(birth_time_str_direct[2:])
+                    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+                        return None, "시간을 0000에서 2359 사이의 유효한 값으로 입력해주세요."
+                    birth_time_for_calc = time(hour, minute)
+                    is_time_entered = True
+                except ValueError:
+                    return None, "시간을 4자리 숫자로 정확하게 입력해주세요."
+            # 시간이 비어있으면 그냥 넘어감 (시간 입력 안함으로 처리)
+    elif time_input_method == '12지시':
+        if birth_time_option != '시간 선택 안 함':
+            is_time_entered = True
+
+    true_solar_dt = None
+    if is_time_entered:
+        region_offset = BIRTH_REGIONS.get(birth_region, 0)
+        if time_input_method == '12지시':
+            try:
+                time_str = birth_time_option.split('(')[1].split('~')[0]
+                hour, minute = map(int, time_str.split(':'))
+                base_dt = datetime.combine(date_obj, time(hour, minute))
+                true_solar_dt = base_dt + timedelta(minutes=region_offset)
+            except (IndexError, ValueError):
+                is_time_entered = False # 파싱 실패 시 시간 미입력으로 간주
+        elif birth_time_for_calc: # 직접 입력
+            base_dt = datetime.combine(date_obj, birth_time_for_calc)
+            true_solar_dt = base_dt + timedelta(minutes=region_offset)
+
+    lookup_date = date_obj
+    lookup_year, lookup_month, lookup_day = lookup_date.year, lookup_date.month, lookup_date.day
+    query_map = {
+        "양력": (df['solar_year'] == lookup_year) & (df['solar_month'] == lookup_month) & (df['solar_day'] == lookup_day),
+        "음력(평달)": (df['lunar_year'] == lookup_year) & (df['lunar_month'] == lookup_month) & (df['lunar_day'] == lookup_day) & (df['is_leap'] != '윤'),
+        "음력(윤달)": (df['lunar_year'] == lookup_year) & (df['lunar_month'] == lookup_month) & (df['lunar_day'] == lookup_day) & (df['is_leap'] == '윤')
+    }
+    result_row = df[query_map[cal_type]]
+
+    if result_row.empty:
+        return None, "데이터베이스에서 해당 날짜 정보를 찾을 수 없습니다. (지원 범위: 1900년 ~ 2050년)"
+
+    result = result_row.iloc[0]
+    korean_age = datetime.now().year - result['solar_year'] + 1
+    pillars = {
+        "연주(年柱)": result['year_ganjee_hj'],
+        "월주(月柱)": result['month_ganjee_hj'],
+        "일주(日柱)": result['day_ganjee_hj'],
+    }
+
+    if is_time_entered and true_solar_dt is not None:
+        # 자시(23:30-01:29)는 날짜가 바뀔 수 있으므로, 시주 계산 시 실제 태어난 날의 일주를 사용해야 함
+        day_ganjee_to_use = result['day_ganjee_hj']
+        # 23:30 이후 출생 시, 일주 간지는 다음날의 것을 사용해야 할 수 있으나, 만세력의 복잡한 규칙(절기 기준)이 있어 여기서는 조회된 날의 일주를 그대로 사용합니다.
+        # (정확도를 더 높이려면 야자시/조자시 구분이 필요)
+        time_jiji = get_time_jiji_from_datetime(true_solar_dt)
+        if time_jiji:
+            time_cheon = get_time_cheongan(day_ganjee_to_use, time_jiji)
+            if time_cheon:
+                pillars["시주(時柱)"] = time_cheon + time_jiji
+
+    blood_type = ""
+    if blood_type_base != "선택 안함":
+        blood_type = f"{blood_type_base}(Rh-)" if is_rh_minus else blood_type_base
+
+    result_data = {
+        "birth_date": date_obj.strftime('%y.%m.%d'),
+        "age": korean_age,
+        "blood_type": blood_type,
+        "zodiac": JIJI_TO_ZODIAC.get(pillars.get("연주(年柱)", "  ")[1], ""),
+        "pillars": pillars,
+        "cal_type": cal_type
+    }
+    return result_data, None
+
 
 # --- 3. 설정 파일 처리 ---
+
+import json
 
 def save_settings(settings, path='settings.json'):
     """
